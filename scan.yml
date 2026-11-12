@@ -1,0 +1,43 @@
+name: Navigator scan
+
+on:
+  schedule:
+    # every 15 minutes, 1 minute after each 15m candle closes (UTC). Sat is skipped (forex closed).
+    - cron: "1,16,31,46 * * * 0-5"
+  workflow_dispatch:
+    inputs:
+      test_message:
+        description: "Send a test message to Telegram"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: navigator-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Scan pairs
+        env:
+          OANDA_TOKEN: ${{ secrets.OANDA_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_MESSAGE: ${{ github.event.inputs.test_message == 'true' && '1' || '0' }}
+        run: python navigator_scan.py
+      - name: Save state (so a setup is only sent once)
+        run: |
+          git config user.name "navigator-bot"
+          git config user.email "navigator-bot@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || (git commit -m "state" && git push)
