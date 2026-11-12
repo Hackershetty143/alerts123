@@ -35,6 +35,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ALERT_GRADES: ${{ vars.ALERT_GRADES }}
           REQUIRE_50: ${{ vars.REQUIRE_50 }}
+          RISK_USD: ${{ vars.RISK_USD }}
+          SL_BUFFER_PIPS: ${{ vars.SL_BUFFER_PIPS }}
           TEST_MESSAGE: ${{ github.event.inputs.test_message == 'true' && '1' || '0' }}
         run: python navigator_scan.py
       - name: Save state (so a setup is only sent once)
