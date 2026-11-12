@@ -28,6 +28,10 @@ ALERT_GRADES = {g.strip().upper() for g in (os.environ.get("ALERT_GRADES") or "A
 # Only alert once the last closed 15m candle has closed beyond 50% of the 15m range (into the 50-100% zone):
 # BUY -> close at / below the 50% level, SELL -> close at / above it. Repo variable REQUIRE_50 = "0" turns it off.
 REQUIRE_50 = (os.environ.get("REQUIRE_50") or "1") != "0"
+# Lot size: risk in USD per trade (repo variable RISK_USD), SL = from the Fib level (71%) to 100% of the 15m range,
+# plus an optional buffer in pips (repo variable SL_BUFFER_PIPS).
+RISK_USD = float(os.environ.get("RISK_USD") or 30)
+SL_BUFFER_PIPS = float(os.environ.get("SL_BUFFER_PIPS") or 0)
 SWING_MTF = 5                   # 4H range swing length
 SWING_LTF = 5                   # 15m range swing length
 LIQ_L, LIQ_R = 5, 5             # 15m liquidity swing sensitivity (left / right)
@@ -233,11 +237,37 @@ def fetch(pair, gran, count, token):
     return out
 
 
+def pip_size(pair):
+    return 0.1 if pair.startswith("XAU") else 0.01 if pair.endswith("JPY") else 0.0001
+
+
+def contract_size(pair):
+    return 100 if pair.startswith("XAU") else 100000
+
+
+def quote_to_usd(pair, rates):
+    """USD value of 1 unit of the pair's quote currency. rates: last closes of the USD crosses."""
+    q = pair.split("_")[1]
+    if q == "USD": return 1.0
+    if q in ("JPY", "CAD", "CHF"): return 1.0 / rates[f"USD_{q}"]
+    if q in ("AUD", "NZD", "GBP", "EUR"): return rates[f"{q}_USD"]
+    raise ValueError(q)
+
+
+def lot_size(pair, s, rates):
+    """SL from the Fib level to 100% of the range; returns (sl_pips, lots) for RISK_USD."""
+    full = s["r_lo"] if s["side"] == "BUY" else s["r_hi"]
+    dist = abs(s["fib"] - full) + SL_BUFFER_PIPS * pip_size(pair)
+    usd_per_lot = dist * contract_size(pair) * quote_to_usd(pair, rates)
+    lots = math.floor(RISK_USD / usd_per_lot * 100) / 100 if usd_per_lot > 0 else 0
+    return dist / pip_size(pair), lots
+
+
 def fmt(x, pair):
     return f"{x:.3f}" if ("JPY" in pair or "XAU" in pair) else f"{x:.5f}"
 
 
-def message(pair, s):
+def message(pair, s, risk=None):
     tick = lambda b: "✅" if b else "❌"
     sym = pair.replace("_", "")
     icon = "🟢" if s["side"] == "BUY" else "🔴"
@@ -249,7 +279,8 @@ def message(pair, s):
             f"{tick(s['align'])} LTF Align\n"
             f"{tick(s['fvg'])} Imbalance ({'Bull' if s['side'] == 'BUY' else 'Bear'} FVG)\n"
             f"{tick(s['sweep'])} LTF Sweep ({'SSL' if s['side'] == 'BUY' else 'BSL'})\n\n"
-            f'<a href="{link}">📈 Open {sym} on TradingView</a>')
+            + (f"SL: {risk[0]:.1f} pips  •  Lot: <b>{risk[1]:.2f}</b>  (${RISK_USD:g} risk)\n\n" if risk else "")
+            + f'<a href="{link}">📈 Open {sym} on TradingView</a>')
 
 
 def send_telegram(text, bot, chat):
@@ -272,6 +303,12 @@ def main():
         send_telegram("🧭 NAVIGATOR scanner is connected. You'll get a message here when a setup forms.", bot, chat)
     print("alert grades:", sorted(ALERT_GRADES), "| require close past 50%:", REQUIRE_50)
     sent = 0
+    rates = {}
+    for x in ("USD_JPY", "USD_CAD", "USD_CHF", "AUD_USD", "NZD_USD", "GBP_USD", "EUR_USD"):
+        try:
+            rates[x] = fetch(x, "M15", 2, token)["c"][-1]
+        except Exception as e:
+            print("rate error", x, e)
     for pair in PAIRS:
         try:
             ltf = fetch(pair, "M15", N_LTF, token)
@@ -286,7 +323,11 @@ def main():
         # one message per setup: same range origin + side + grade is not sent twice
         key = f"{s['side']}|{s['origin_t']}|{s['grade']}"
         if s["grade"] in ALERT_GRADES and (s["in50"] or not REQUIRE_50) and state.get(pair) != key:
-            send_telegram(message(pair, s), bot, chat)
+            try:
+                risk = lot_size(pair, s, rates)
+            except Exception as e:
+                print(pair, "lot size error:", e); risk = None
+            send_telegram(message(pair, s, risk), bot, chat)
             sent += 1
             state[pair] = key
         time.sleep(0.2)
