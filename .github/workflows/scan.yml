@@ -33,6 +33,8 @@ jobs:
           OANDA_TOKEN: ${{ secrets.OANDA_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ALERT_GRADES: ${{ vars.ALERT_GRADES }}
+          REQUIRE_50: ${{ vars.REQUIRE_50 }}
           TEST_MESSAGE: ${{ github.event.inputs.test_message == 'true' && '1' || '0' }}
         run: python navigator_scan.py
       - name: Save state (so a setup is only sent once)
