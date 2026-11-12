@@ -23,13 +23,17 @@ import requests
 PAIRS = ["XAU_USD", "EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD", "USD_CHF", "NZD_USD",
          "EUR_JPY", "EUR_CAD", "EUR_AUD", "EUR_NZD", "AUD_CAD", "AUD_CHF", "AUD_NZD",
          "GBP_AUD", "GBP_CAD", "GBP_NZD", "NZD_JPY", "NZD_CHF", "NZD_CAD", "CAD_JPY", "CHF_JPY"]
-ALERT_GRADES = {"A+", "A"}      # which grades send a Telegram message
+# Which grades send a message. Change without editing code: GitHub repo variable ALERT_GRADES, e.g. "A+,A,B"
+ALERT_GRADES = {g.strip().upper() for g in (os.environ.get("ALERT_GRADES") or "A+,A").split(",") if g.strip()}
+# Only alert once the last closed 15m candle has closed beyond 50% of the 15m range (into the 50-100% zone):
+# BUY -> close at / below the 50% level, SELL -> close at / above it. Repo variable REQUIRE_50 = "0" turns it off.
+REQUIRE_50 = (os.environ.get("REQUIRE_50") or "1") != "0"
 SWING_MTF = 5                   # 4H range swing length
 SWING_LTF = 5                   # 15m range swing length
 LIQ_L, LIQ_R = 5, 5             # 15m liquidity swing sensitivity (left / right)
 SWEEP_LB = 10                   # sweep window before the range extreme (15m candles)
 MAX_FVG = 15                    # 15m FVGs tracked
-FIB_LEVEL = 0.71                # shown in the message (reference only)
+FIB_LEVEL = 0.71                # used only when FVG_RULE_FIB = True
 FVG_RULE_FIB = False            # False = FVG in 50-100% of the range, True = FVG must contain the Fib level
 CLOSE_BREAK = True              # BOS / CHoCH confirmed by close
 WICK_EXT = True                 # extend the range to new wick extremes on the 0% side
@@ -200,7 +204,8 @@ def evaluate(ltf, mtf):
         base = 0 if (with_bias and align) else 1 if align else 2 if with_bias else 3
         step = base + (0 if fvg_ok else 1) + (0 if range_sweep else 1)
         grade = ["A+", "A", "B", "C"][step] if step <= 3 else "F"
-        st = dict(side="BUY" if lDir == 1 else "SELL", grade=grade, bias="BULLISH" if hDir == 1 else "BEARISH",
+        in50 = c[i] <= lEq if lDir == 1 else c[i] >= lEq
+        st = dict(side="BUY" if lDir == 1 else "SELL", in50=in50, grade=grade, bias="BULLISH" if hDir == 1 else "BEARISH",
                   zone="Premium" if hPD == 1 else "Discount" if hPD == -1 else "EQ", pos=hPos,
                   with_bias=with_bias, align=align, fvg=fvg_ok, sweep=range_sweep,
                   r_hi=lHi, r_lo=lLo, fib=fibY, eq=lEq, origin_t=t[left], close=c[i], bar_t=t[i])
@@ -234,24 +239,22 @@ def fmt(x, pair):
 
 def message(pair, s):
     tick = lambda b: "✅" if b else "❌"
-    tag = "" if s["with_bias"] else "  (counter-trend)"
-    when = datetime.fromtimestamp(s["bar_t"] + 900, IST).strftime("%d %b %H:%M IST")
-    return (f"🧭 NAVIGATOR  {pair.replace('_', '')}  15m\n"
-            f"<b>{s['side']} ({s['grade']})</b>{tag}\n\n"
+    sym = pair.replace("_", "")
+    icon = "🟢" if s["side"] == "BUY" else "🔴"
+    tag = "  (counter-trend)" if not s["with_bias"] else ""
+    link = f"https://www.tradingview.com/chart/?symbol=OANDA:{sym}&amp;interval=15"
+    return (f"{icon} <b>{sym}</b>  •  <b>{s['side']} ({s['grade']})</b>{tag}\n\n"
             f"Bias: {s['bias']} (4H)\n"
-            f"4H range: {s['zone']} {s['pos']:.0f}%\n"
-            f"{tick(s['align'])} LTF Align: {s['side']} in {s['zone']}\n"
-            f"{tick(s['fvg'])} Imbalance: {'Bull' if s['side'] == 'BUY' else 'Bear'} FVG\n"
-            f"{tick(s['sweep'])} LTF Sweep: {'SSL' if s['side'] == 'BUY' else 'BSL'} swept\n\n"
-            f"15m range: {fmt(s['r_lo'], pair)} – {fmt(s['r_hi'], pair)}\n"
-            f"{FIB_LEVEL * 100:.0f}% level: {fmt(s['fib'], pair)}\n"
-            f"Close: {fmt(s['close'], pair)}  •  {when}\n"
-            f"Review the chart before trading.")
+            f"Range: {s['zone']} {s['pos']:.0f}%\n"
+            f"{tick(s['align'])} LTF Align\n"
+            f"{tick(s['fvg'])} Imbalance ({'Bull' if s['side'] == 'BUY' else 'Bear'} FVG)\n"
+            f"{tick(s['sweep'])} LTF Sweep ({'SSL' if s['side'] == 'BUY' else 'BSL'})\n\n"
+            f'<a href="{link}">📈 Open {sym} on TradingView</a>')
 
 
 def send_telegram(text, bot, chat):
     r = requests.post(f"https://api.telegram.org/bot{bot}/sendMessage",
-                      data={"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True},
+                      data={"chat_id": chat, "text": text, "parse_mode": "HTML", "disable_web_page_preview": "true"},
                       timeout=30)
     if not r.ok:
         print("Telegram error:", r.status_code, r.text[:200])
@@ -267,6 +270,7 @@ def main():
         state = {}
     if os.environ.get("TEST_MESSAGE") == "1":
         send_telegram("🧭 NAVIGATOR scanner is connected. You'll get a message here when a setup forms.", bot, chat)
+    print("alert grades:", sorted(ALERT_GRADES), "| require close past 50%:", REQUIRE_50)
     sent = 0
     for pair in PAIRS:
         try:
@@ -278,10 +282,10 @@ def main():
             continue
         if not s:
             print(pair, "not ready"); continue
-        print(f"{pair}: {s['side']} ({s['grade']})  bias={s['bias']} zone={s['zone']} fvg={s['fvg']} sweep={s['sweep']}")
+        print(f"{pair}: {s['side']} ({s['grade']})  bias={s['bias']} zone={s['zone']} fvg={s['fvg']} sweep={s['sweep']} past50={s['in50']}")
         # one message per setup: same range origin + side + grade is not sent twice
         key = f"{s['side']}|{s['origin_t']}|{s['grade']}"
-        if s["grade"] in ALERT_GRADES and state.get(pair) != key:
+        if s["grade"] in ALERT_GRADES and (s["in50"] or not REQUIRE_50) and state.get(pair) != key:
             send_telegram(message(pair, s), bot, chat)
             sent += 1
             state[pair] = key
